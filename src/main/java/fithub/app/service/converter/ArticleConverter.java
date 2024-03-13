@@ -25,6 +25,9 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -106,19 +109,38 @@ public class ArticleConverter {
 
     public static void createAndMapArticleImage(List<MultipartFile> articleImageList, Article article) throws IOException
     {
-        for(int i = 0; i < articleImageList.size(); i++){
-            MultipartFile image = articleImageList.get(i);
-            try{
-                Uuid uuid = staticAmazonS3Manager.createUUID();
-                String KeyName = staticAmazonS3Manager.generateArticleKeyName(uuid, image.getOriginalFilename());
-                String fileUrl = staticAmazonS3Manager.uploadFile(KeyName, image);
-                staticLogger.info("S3에 업로드 한 파일의 url : {}", fileUrl);
-                ArticleImage articleImage = ArticleImageConverter.toArticleImage(fileUrl, article, uuid);
-                articleImage.setArticle(article);
-            }catch (IOException e) {
-                staticLogger.error("파일 업로드 에러 발생");
-                throw new RuntimeException("IOException occurred while upload image...", e);
+        ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+
+        for (int i = 0; i < articleImageList.size(); i++) {
+            final MultipartFile image = articleImageList.get(i);
+
+            executor.submit(() -> {
+                try {
+                    Uuid uuid = staticAmazonS3Manager.createUUID();
+                    String keyName = staticAmazonS3Manager.generateArticleKeyName(uuid, image.getOriginalFilename());
+                    String fileUrl = staticAmazonS3Manager.uploadFile(keyName, image);
+                    staticLogger.info("S3에 업로드 한 파일의 url : {}", fileUrl);
+
+                    // 여기서 ArticleImage 객체 생성과 관련된 작업은 동기화 이슈를 피하기 위해 주의 깊게 처리해야 합니다.
+                    synchronized (article) {
+                        ArticleImage articleImage = ArticleImageConverter.toArticleImage(fileUrl, article, uuid);
+                        articleImage.setArticle(article);
+                        // 필요하다면 여기에서 articleImage를 저장하거나 관리하는 로직을 추가합니다.
+                    }
+                } catch (IOException e) {
+                    staticLogger.error("파일 업로드 에러 발생", e);
+                }
+            });
+        }
+
+        executor.shutdown();
+        try {
+            // 모든 스레드 작업이 완료될 때까지 대기
+            if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
             }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
         }
 //        ExecutorService executorService = Executors.newFixedThreadPool(Math.min(articleImageList.size(), 5));
 //        List<CompletableFuture<Void>> futures = articleImageList.stream()
